@@ -1,0 +1,13 @@
+# Lead Finder on YOUR Mac, reachable only by you through Tailscale (free). No public server, no domain or DNS change.
+# The app port is bound to 127.0.0.1 only; `tailscale serve` adds private HTTPS on top (the login cookie needs HTTPS).
+# Steps: deploy/README-mac.md
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env.server
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./server-data:/data   # leads.db + backups live here, visible in Finder
+      - ./public/backgrounds:/app/public/backgrounds:ro   # your wallpapers (kept out of the image on purpose)

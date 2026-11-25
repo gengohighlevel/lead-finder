@@ -1,0 +1,27 @@
+node_modules
+.next
+.env
+.env.server
+.env.tunnel
+.env.backup
+.env.caddy
+*.db
+.superpowers
+next-env.d.ts
+tsconfig.tsbuildinfo
+
+# local wallpaper collections (your own images; never committed)
+public/backgrounds/
+
+# backups of the library, logs and the app's process file (never committed)
+backups/
+logs/
+.app.pid
+outreach-policy.json
+
+
+# the Mac setup's data folder (library + backups)
+server-data/
+
+# your own offer text (OFFER.example.md is the template)
+OFFER.md

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Send the project to your server and (re)start it.   scripts/deploy user@server-ip
+# The first time, also put the three .env.* files on the server (see deploy/README.md). They are never sent by this script.
+set -eu
+HOST="${1:-}"; [ -n "$HOST" ] || { echo "Usage: scripts/deploy user@server"; exit 1; }
+DIR="${DEPLOY_DIR:-/opt/lead-finder}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+echo "Sending the project to $HOST:$DIR ..."
+rsync -az \
+  --exclude node_modules --exclude .next --exclude .git --exclude '.env' --exclude '.env.server' --exclude '.env.tunnel' --exclude '.env.backup' \
+  --exclude '*.db' --exclude '*.db-*' --exclude backups --exclude logs --exclude .app.pid --exclude outreach-policy.json --exclude tests \
+  --exclude 'public/backgrounds' --exclude tsconfig.tsbuildinfo \
+  "$ROOT/" "$HOST:$DIR/"
+echo "Building and starting (the first build takes a few minutes) ..."
+ssh "$HOST" "cd $DIR && docker compose up -d --build && docker compose ps"
+echo "Done. Check: ssh $HOST 'cd $DIR && docker compose logs --tail 30 app'"

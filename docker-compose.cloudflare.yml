@@ -1,0 +1,29 @@
+# The Cloudflare Tunnel + Cloudflare Access version (needs the domain's DNS on Cloudflare). See deploy/README-cloudflare.md.
+# Use it with:  docker compose -f docker-compose.cloudflare.yml up -d --build
+# Nothing is published to the internet: only the Cloudflare tunnel can reach the app, and Cloudflare Access puts a login in front of it.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env.server
+    volumes:
+      - data:/data
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    env_file: .env.tunnel          # TUNNEL_TOKEN
+    depends_on: [app]
+
+  backup-sync:
+    image: rclone/rclone:latest
+    restart: unless-stopped
+    env_file: .env.backup
+    volumes:
+      - data:/data:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["while true; do rclone copy /data/backups r2:$${R2_BUCKET}/lead-finder-backups --ignore-existing --min-age 1m; sleep 3600; done"]
+
+volumes:
+  data:

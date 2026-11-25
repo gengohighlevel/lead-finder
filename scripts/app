@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Lead Finder: run it as an app (a built server, not the dev server).
+#   scripts/app start        build if the code changed, start in the background, print the address
+#   scripts/app stop         stop it
+#   scripts/app restart      stop, rebuild if needed, start
+#   scripts/app status       is it running, the address, the library size, the latest backup
+#   scripts/app logs         follow the log
+#   scripts/app restore      pick a backup and put it back (the current library is kept first)
+#   scripts/app autostart on|off   start it at login (macOS, no password needed)
+# PORT=3100 scripts/app start   use another port.
+set -u
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT" || exit 1
+PORT="${PORT:-3000}"
+HOST="127.0.0.1"
+URL="http://$HOST:$PORT"
+PIDFILE="$ROOT/.app.pid"
+LOG="$ROOT/logs/app.log"
+LABEL="com.leadfinder.app"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+mkdir -p "$ROOT/logs"
+
+# settings from .env (only the ones this script needs)
+env_get() { [ -f .env ] && grep -E "^$1=" .env | tail -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' || true; }
+DB="${LEADS_DB:-$(env_get LEADS_DB)}"; DB="${DB:-leads.db}"
+BKDIR="${BACKUP_DIR:-$(env_get BACKUP_DIR)}"; BKDIR="${BKDIR:-backups}"
+case "$DB" in /*) ;; *) DB="$ROOT/$DB" ;; esac
+case "$BKDIR" in /*) ;; *) BKDIR="$ROOT/$BKDIR" ;; esac
+
+say() { printf '%s\n' "$*"; }
+listening_pid() { lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1; }
+is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+
+needs_build() {
+  [ -f .next/BUILD_ID ] || return 0
+  # any source, config or dependency file newer than the last build
+  [ -n "$(find app lib public instrumentation.ts next.config.mjs package.json package-lock.json tsconfig.json -type f -newer .next/BUILD_ID 2>/dev/null | head -1)" ]
+}
+build() {
+  if needs_build; then
+    say "Building the app (about 15 seconds)…"
+    npx next build >> "$LOG" 2>&1 || { say "The build failed. See: scripts/app logs"; tail -20 "$LOG"; return 1; }
+  fi
+}
+
+cmd_start() {
+  if is_running; then say "Already running: $URL"; return 0; fi
+  other="$(listening_pid)"
+  if [ -n "$other" ]; then
+    say "Something else is using port $PORT (process $other: $(ps -o command= -p "$other" | cut -c1-70))."
+    say "If that is the old dev server, stop it first (Ctrl+C in its terminal, or: kill $other), then run this again."
+    return 1
+  fi
+  build || return 1
+  nohup node node_modules/next/dist/bin/next start -H "$HOST" -p "$PORT" >> "$LOG" 2>&1 &
+  echo $! > "$PIDFILE"
+  for _ in $(seq 1 40); do
+    if curl -s -o /dev/null --max-time 2 "$URL/api/gate"; then say "Running: $URL"; return 0; fi
+    kill -0 "$(cat "$PIDFILE")" 2>/dev/null || { say "It stopped right after starting. See: scripts/app logs"; tail -15 "$LOG"; rm -f "$PIDFILE"; return 1; }
+    sleep 0.5
+  done
+  say "It did not answer in 20 seconds. See: scripts/app logs"; return 1
+}
+
+cmd_stop() {
+  if is_running; then
+    pid="$(cat "$PIDFILE")"; kill "$pid" 2>/dev/null
+    for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+    rm -f "$PIDFILE"; say "Stopped."
+  else
+    rm -f "$PIDFILE"; say "Not running (from this script)."
+    other="$(listening_pid)"; [ -n "$other" ] && say "Note: process $other is listening on port $PORT: $(ps -o command= -p "$other" | cut -c1-70)"
+  fi
+  return 0
+}
+
+cmd_status() {
+  if is_running && curl -s -o /dev/null --max-time 3 "$URL/api/gate"; then say "Running: $URL (process $(cat "$PIDFILE"))"; else say "Not running."; fi
+  [ -f "$DB" ] && say "Library: $DB ($(du -h "$DB" | cut -f1))"
+  newest="$(ls -1t "$BKDIR"/leads-*.db 2>/dev/null | head -1)"
+  [ -n "$newest" ] && say "Latest backup: $(basename "$newest") ($(ls -1 "$BKDIR"/leads-*.db 2>/dev/null | wc -l | tr -d ' ') kept in $BKDIR)" || say "No backups yet (the first is made a few seconds after the app starts)."
+  [ -f "$PLIST" ] && say "Starts at login: yes" || say "Starts at login: no (scripts/app autostart on)"
+}
+
+cmd_restore() {
+  files=( $(ls -1t "$BKDIR"/leads-*.db 2>/dev/null) )
+  [ "${#files[@]}" -gt 0 ] || { say "No backups in $BKDIR"; return 1; }
+  pick="${1:-}"
+  if [ -z "$pick" ]; then
+    say "Backups (newest first):"; i=1
+    for f in "${files[@]:0:15}"; do say "  $i) $(basename "$f")  ($(du -h "$f" | cut -f1))"; i=$((i+1)); done
+    printf "Restore which one? (number, or q to cancel) "; read -r pick
+    [ "$pick" = "q" ] || [ -z "$pick" ] && { say "Cancelled."; return 0; }
+  fi
+  if [[ "$pick" =~ ^[0-9]+$ ]]; then file="${files[$((pick-1))]:-}"; else file="$BKDIR/$(basename "$pick")"; fi
+  [ -f "$file" ] || { say "Not found: $pick"; return 1; }
+  n="$(sqlite3 "$file" 'select count(*) from leads' 2>/dev/null || echo '?')"
+  say "This will replace your current library with $(basename "$file") ($n leads)."
+  printf "Type YES to continue: "; read -r ok; [ "$ok" = "YES" ] || { say "Cancelled."; return 0; }
+  was_running=0; is_running && was_running=1
+  cmd_stop >/dev/null
+  mkdir -p "$BKDIR"
+  keep="$BKDIR/leads-$(date -u +%Y-%m-%dT%H-%M-%SZ)-before-restore.db"
+  [ -f "$DB" ] && cp "$DB" "$keep" && say "Your current library was kept as $(basename "$keep")."
+  rm -f "$DB-wal" "$DB-shm"
+  cp "$file" "$DB" && say "Restored."
+  [ "$was_running" = "1" ] && cmd_start
+  return 0
+}
+
+cmd_autostart() {
+  case "${1:-}" in
+    on)
+      mkdir -p "$HOME/Library/LaunchAgents"
+      NODE="$(command -v node)"; [ -n "$NODE" ] || { say "node not found"; return 1; }
+      cat > "$PLIST" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>WorkingDirectory</key><string>$ROOT</string>
+  <key>ProgramArguments</key><array><string>$NODE</string><string>$ROOT/node_modules/next/dist/bin/next</string><string>start</string><string>-H</string><string>$HOST</string><string>-p</string><string>$PORT</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$(dirname "$NODE"):/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$LOG</string><key>StandardErrorPath</key><string>$LOG</string>
+</dict></plist>
+PL
+      plutil -lint "$PLIST" >/dev/null || { say "Could not write a valid login item."; rm -f "$PLIST"; return 1; }
+      build || return 1
+      cmd_stop >/dev/null
+      launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null; launchctl bootstrap "gui/$(id -u)" "$PLIST" && say "It now starts at login and restarts if it stops: $URL" ;;
+    off)
+      launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null; rm -f "$PLIST"; say "It no longer starts at login. (scripts/app start to run it now.)" ;;
+    *) say "Use: scripts/app autostart on|off"; return 1 ;;
+  esac
+}
+
+case "${1:-}" in
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_stop >/dev/null; cmd_start ;;
+  status) cmd_status ;;
+  logs) tail -n 60 -f "$LOG" ;;
+  restore) shift; cmd_restore "${1:-}" ;;
+  autostart) shift; cmd_autostart "${1:-}" ;;
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

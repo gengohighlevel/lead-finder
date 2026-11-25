@@ -1,0 +1,24 @@
+# HTTPS for Lead Finder. Caddy gets and renews a free Let's Encrypt certificate for APP_DOMAIN by itself.
+# It needs: the DNS A record for APP_DOMAIN pointing at this server, and ports 80 and 443 open.
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		X-Robots-Tag "noindex, nofollow"
+		-Server
+	}
+
+	request_body {
+		max_size 5MB
+	}
+
+	reverse_proxy app:3000 {
+		# one value, the address Caddy actually saw: the app's login lockout relies on it
+		header_up X-Forwarded-For {remote_host}
+	}
+}

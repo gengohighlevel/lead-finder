@@ -1,0 +1,40 @@
+# Lead Finder on a server with its OWN login (password + authenticator app) and automatic HTTPS from Caddy.
+# Use this when your domain's DNS stays where it is (for example Namecheap): you add one A record and nothing else changes.
+# Only Caddy is published (ports 80 and 443). The app itself has no published port.
+# Secrets live in the .env.* files next to this one (see deploy/README.md). The Cloudflare Tunnel version is docker-compose.cloudflare.yml.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env.server
+    volumes:
+      - data:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    env_file: .env.caddy           # APP_DOMAIN, ACME_EMAIL
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [app]
+
+  # copies every backup to cloud storage (Cloudflare R2 free 10 GB, or any S3-compatible service) so a lost server does not lose the library
+  backup-sync:
+    image: rclone/rclone:latest
+    restart: unless-stopped
+    env_file: .env.backup
+    volumes:
+      - data:/data:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["while true; do rclone copy /data/backups r2:$${R2_BUCKET}/lead-finder-backups --ignore-existing --min-age 1m; sleep 3600; done"]
+
+volumes:
+  data:
+  caddy_data:
+  caddy_config:
